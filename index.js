@@ -970,9 +970,7 @@ app.post('/api/sessions/:id/questions/:sqid/grade',
       ai: {
         score: aiRaw.score,
         grade: aiRaw.grade,
-        summary: feedbackText,
-
-        // 기존 프론트 대응을 위해 summary만 따라감
+        summary: aiRaw.summary_interviewer || feedbackText,
         summary_interviewer: aiRaw.summary_interviewer,
         summary_coach: aiRaw.summary_coach,
 
