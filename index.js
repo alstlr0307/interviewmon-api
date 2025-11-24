@@ -951,7 +951,7 @@ app.post('/api/sessions/:id/questions/:sqid/grade',
       [
         answer,
         aiRaw.score,
-        feedbackText,                     // V5 전체 내용이 들어간 텍스트
+        feedbackText,                    
         aiRaw.category || q.category || null,
         sqid,
         sessionId,
@@ -970,7 +970,10 @@ app.post('/api/sessions/:id/questions/:sqid/grade',
       ai: {
         score: aiRaw.score,
         grade: aiRaw.grade,
-        summary: aiRaw.summary_interviewer || feedbackText,
+
+        // ⬅ summary는 반드시 "한 줄 요약"만 넣기
+        summary: aiRaw.summary_interviewer ?? aiRaw.summary_coach ?? "",
+
         summary_interviewer: aiRaw.summary_interviewer,
         summary_coach: aiRaw.summary_coach,
 
