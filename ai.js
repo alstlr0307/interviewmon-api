@@ -1,155 +1,195 @@
-// ai.js
-// -----------------------------------------------------------------------------
-// 규칙 기반 경량 평가기: STAR/지표/기술 키워드/톤을 종합해 점수·등급·섹션(강점/보완/추가/주의/다음)을 생성
-// DB에는 완본 텍스트(feedbackText)를 저장하고, API 응답엔 구조화 필드를 함께 내려줍니다.
-// -----------------------------------------------------------------------------
+// ai.js (InterviewMon AI V5 – Production Grade)
+// GPT 기반 심층 평가: STAR, 정량성, 논리성, 직무 기술성, 위험요소, 10축 차트, Follow-up 질문, 모범답변 생성
 
+const OpenAI = require("openai");
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// ----------------------------------------------------------
+// 카테고리 식별기
+// ----------------------------------------------------------
 function pickCategory(question = "") {
   const q = question.toLowerCase();
-  if (/(lead|ownership|mentor|conflict|communication|culture)/.test(q)) return "behavior";
-  if (/(perf|latency|qps|cpu|gpu|optimi|cache|branch|icache|lto|pgo)/.test(q)) return "tech";
-  if (/(archi|design|scale|traffic|db|cache|mq|micro|service)/.test(q)) return "architecture";
-  if (/(incident|failure|postmortem|outage|sev)/.test(q)) return "incident";
-  if (/(data|metric|kpi|ab|exp|cohort|funnel)/.test(q)) return "data";
+  if (/(lead|mentor|conflict|communication)/.test(q)) return "behavior";
+  if (/(perf|latency|qps|cpu|gpu|cache|optimi)/.test(q)) return "tech";
+  if (/(archi|design|scale|traffic|db|service)/.test(q)) return "architecture";
+  if (/(incident|failure|postmortem)/.test(q)) return "incident";
+  if (/(data|metric|ab|experiment)/.test(q)) return "data";
   return "general";
 }
 
-function scoreAnswer(question, answer) {
-  const a = (answer || "").trim();
-  if (!a) return 0;
-
-  let score = 20;
-
-  // 길이 가산
-  const len = a.length;
-  if (len >= 80) score += 10;
-  if (len >= 160) score += 10;
-  if (len >= 300) score += 10;
-  if (len >= 450) score += 10;
-
-  // STAR 감지
-  const hasS = /상황|situation/i.test(a);
-  const hasT = /과제|task|목표/i.test(a);
-  const hasA = /행동|action|조치/i.test(a);
-  const hasR = /결과|result|성과|지표/i.test(a);
-  const starCount = [hasS, hasT, hasA, hasR].filter(Boolean).length;
-  score += starCount * 8;
-
-  // 숫자/지표
-  if (/\b(\d+(\.\d+)?)(\s?%|ms|s|qps|배|건|회)\b/i.test(a)) score += 10;
-  if (/\b(전후|before|after|baseline|target)\b/i.test(a)) score += 5;
-
-  // 기술 키워드
-  const techKW = /(프로파일|profil|플레임|flame|벤치|bench|캐시|cache|배치|batch|큐|queue|샤딩|shard|리트라이|retry|circuit|idempot)/i;
-  if (techKW.test(a)) score += 10;
-
-  // 회고/재발 방지
-  if (/(회고|postmortem|재발|prevent|rca|원인분석)/i.test(a)) score += 8;
-
-  // 위험한 표현 패널티
-  if (/(아마|대충|그냥)/i.test(a)) score -= 5;
-  if (/(완벽|절대)/i.test(a)) score -= 3;
-
-  // 범위 제한
-  score = Math.max(0, Math.min(100, score));
-  return score;
-}
-
-function gradeFromScore(s) {
-  if (s >= 90) return "S";
-  if (s >= 80) return "A";
-  if (s >= 70) return "B";
-  if (s >= 60) return "C";
-  if (s >= 50) return "D";
-  return "F";
-}
-
-function extractKeywords(question, answer) {
-  const text = `${question} ${answer}`.toLowerCase();
-  const dict = ["latency", "cache", "batch", "retry", "circuit", "idempotent", "ab", "metric", "scale", "profiling", "shard", "timeout", "throughput"];
-  const hit = dict.filter(k => text.includes(k));
-  const miss = dict.filter(k => !text.includes(k)).slice(0, 6);
-  return { hit, miss };
-}
-
-function craftPolished(answer) {
-  // STAR 미사용 시 간단 STAR 템플릿
-  if (!/(상황|과제|행동|결과)/.test(answer)) {
-    return [
-      "상황: 운영 환경에서 초기 로드 지연이 관찰되었습니다.",
-      "과제: 초기 로드 시간을 30% 이상 단축하는 목표를 설정했습니다.",
-      "행동: 병목 구간을 계측하고 캐싱·지연로딩·불필요 초기화 제거·빌드 최적화를 적용했습니다.",
-      "결과: cold start 42% 단축, 장애 재현/검증 로그 정비, 이후 릴리즈에 재발 방지 체크리스트를 도입했습니다.",
-    ].join("\n");
-  }
-  return answer;
-}
-
-function craftFeedbackBlocks({ question, answer, category, score }) {
-  const isTech = category === "tech" || category === "architecture";
-  const strengths = [], gaps = [], adds = [], pitfalls = [], next = [];
-
-  if (/상황|과제|행동|결과/.test(answer)) strengths.push("STAR 구조를 활용했습니다.");
-  if (/(%|ms|qps|배|건|회)/i.test(answer)) strengths.push("정량 지표(%, ms 등)로 효과를 제시했습니다.");
-  if (/(계측|프로파일|분석|재현|가설)/.test(answer)) strengths.push("원인 규명/검증 활동을 언급했습니다.");
-
-  if (!/(상황|과제|행동|결과)/.test(answer)) gaps.push("STAR 4문장(상황→과제→행동→결과)으로 분리해 주세요.");
-  if (!/(%|ms|qps|배|건|회)/i.test(answer)) gaps.push("전/후 수치 또는 시간/비율 등의 정량 지표를 포함하세요.");
-  if (!/(회고|재발|postmortem|prevent)/i.test(answer)) gaps.push("회고와 재발 방지 대책을 1~2문장 추가하세요.");
-
-  if (isTech && !/(프로파일|flame|벤치|bench)/i.test(answer)) adds.push("프로파일/벤치마크 결과를 1~2문장 포함하세요.");
-  if (isTech && !/(캐시|cache|배치|batch|큐|queue|샤딩|shard)/i.test(answer)) adds.push("캐시/배치/큐잉/샤딩 등 시스템 레벨 대안을 한 줄 추가하세요.");
-
-  if (/(아마|대충)/.test(answer)) pitfalls.push("추측성 표현을 줄이고 데이터·근거를 먼저 제시하세요.");
-  if (/(완벽|절대)/.test(answer)) pitfalls.push("절대적 표현 대신 리스크/한계를 투명하게 언급하세요.");
-
-  if (score >= 85) next.push("핵심만 60초 버전으로 요약해 말하는 연습을 하세요.");
-  else if (score >= 70) next.push("전/후 수치·검증·회고를 보강해 80점대까지 끌어올리세요.");
-  else next.push("STAR 4문장부터 정확히 정리하고 핵심 지표 2개 이상을 넣어보세요.");
-
-  const summary =
-    score >= 85
-      ? "원인 규명과 검증이 분명합니다. 60초 압축 버전까지 준비하면 완성도가 높아집니다."
-      : score >= 70
-      ? "핵심은 잡았으나 지표/검증/회고의 밀도가 부족합니다. STAR와 수치를 보강하세요."
-      : "핵심 스토리가 약합니다. STAR로 구조화하고 정량 지표·검증 과정을 추가하세요.";
-
-  return { summary, strengths, gaps, adds, pitfalls, next };
-}
-
-function toFeedbackText({ summary, strengths = [], gaps = [], adds = [], pitfalls = [], next = [] }) {
-  return [
-    `요약: ${summary || ""}`,
-    strengths.length ? ["", "■ 잘한 점", ...strengths.map(s => `• ${s}`)].join("\n") : "",
-    gaps.length ? ["", "■ 보완 포인트", ...gaps.map(s => `• ${s}`)].join("\n") : "",
-    adds.length ? ["", "■ 추가하면 좋은 내용", ...adds.map(s => `• ${s}`)].join("\n") : "",
-    pitfalls.length ? ["", "■ 주의할 점", ...pitfalls.map(s => `• ${s}`)].join("\n") : "",
-    next.length ? ["", "■ 다음 답변 가이드", ...next.map(s => `• ${s}`)].join("\n") : "",
-  ].join("\n").trim();
-}
-
+// ----------------------------------------------------------
+// GPT 평가 엔진
+// ----------------------------------------------------------
 async function gradeAnswer({ company, jobTitle, question, answer }) {
-  const category = pickCategory(question);
-  const score = scoreAnswer(question, answer);
-  const grade = gradeFromScore(score);
-  const keywords = extractKeywords(question, answer);
-  const polished = craftPolished(answer);
-  const blocks = craftFeedbackBlocks({ question, answer, category, score });
-  const feedbackText = toFeedbackText(blocks);
+  const model = process.env.AI_MODEL || "gpt-4o-mini";
+
+  // 🟣 강력한 System Prompt (AI 행동 고정)
+  const systemPrompt = `
+당신은 실리콘밸리 기술면접관 + 시니어 코치입니다.
+절대 장황하게 설명하지 말고, JSON만 정확하게 생성해야 합니다.
+
+규칙:
+1) JSON 외 문장은 절대 출력하지 않음.
+2) null 대신 빈 배열([]) 또는 0을 사용.
+3) 점수는 반드시 정수(0~100).
+4) diff는 '-' 삭제 + '+' 추가 형식 유지.
+5) polished는 10~18줄 사이로 제한.
+6) follow_up_questions는 최소 3개, 최대 6개.
+7) chart 축은 모두 0~100 사이 정수.
+8) 누락된 필드 있으면 안 됨.
+`;
+
+  // 🟦 User Prompt
+  const userPrompt = `
+아래 답변을 분석하세요.
+
+【질문】 ${question}
+【직무】 ${jobTitle}
+【기업】 ${company}
+
+【지원자 답변】
+${answer}
+
+출력 형식(JSON only):
+
+{
+  "score": 0~100 정수,
+  "grade": "S" | "A" | "B" | "C" | "D" | "F",
+
+  "summary_interviewer": "...",
+  "summary_coach": "...",
+
+  "strengths": ["항목"],
+  "gaps": ["항목"],
+  "adds": ["항목"],
+  "pitfalls": [
+    { "text": "문장", "level": 1~3 }
+  ],
+  "next": ["항목"],
+
+  "rewrite_diff": "diff 형식",
+
+  "follow_up_questions": ["질문1", "질문2", ...],
+
+  "chart": {
+    "star_s": 0~100,
+    "star_t": 0~100,
+    "star_a": 0~100,
+    "star_r": 0~100,
+    "quant": 0~100,
+    "logic": 0~100,
+    "tech": 0~100,
+    "fit": 0~100,
+    "brevity": 0~100,
+    "risk": 0~100
+  },
+
+  "keywords": ["키워드"],
+  "category": "tech | behavior | data | architecture | incident | general",
+
+  "polished": "모범답변 (10~18줄)"
+}
+`;
+
+  // ----------------------------------------------------------
+  // GPT 요청
+  // ----------------------------------------------------------
+  const response = await client.chat.completions.create({
+    model,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+  });
+
+  const data = response.choices[0].message.parsed;
+
+  // ----------------------------------------------------------
+  // 후처리 안정성 보정
+  // ----------------------------------------------------------
+
+  // 카테고리 누락 시 자동 보정
+  data.category = data.category || pickCategory(question);
+
+  // 점수/차트값 정수화 + 범위 제한
+  if (data.chart) {
+    for (const k of Object.keys(data.chart)) {
+      let v = Number(data.chart[k]);
+      if (!Number.isFinite(v)) v = 0;
+      data.chart[k] = Math.min(100, Math.max(0, Math.round(v)));
+    }
+  }
+
+  // 점수 보정
+  if (!Number.isFinite(data.score)) data.score = 0;
+  data.score = Math.max(0, Math.min(100, Math.round(data.score)));
+
+  // pitfall level 보정
+  if (Array.isArray(data.pitfalls)) {
+    data.pitfalls = data.pitfalls.map((p) => ({
+      text: p.text || "",
+      level: Math.max(1, Math.min(3, Number(p.level) || 1)),
+    }));
+  }
+
+  // polished(모범답변) 길이 보정
+  if (data.polished) {
+    const lines = data.polished.trim().split("\n");
+    if (lines.length < 8) data.polished = expandPolished(data.polished);
+    if (lines.length > 20) data.polished = lines.slice(0, 18).join("\n");
+  }
 
   return {
-    data: {
-      score, grade, category, keywords,
-      summary: blocks.summary,
-      polished,
-      strengths: blocks.strengths,
-      gaps: blocks.gaps,
-      adds: blocks.adds,
-      pitfalls: blocks.pitfalls,
-      next: blocks.next,
-    },
-    feedbackText,
+    data,
+    feedbackText: buildFeedbackText(data),
   };
+}
+
+// ----------------------------------------------------------
+// polished 자동 확장 보정
+// ----------------------------------------------------------
+function expandPolished(text) {
+  // 답변이 너무 짧을 경우 안전하게 STAR 형태로 확장
+  return `
+[S] 상황: 문제의 원인이 되었던 초기 조건을 명확히 설명합니다.
+[T] 과제: 해결해야 했던 목표 또는 요구사항을 제시합니다.
+[A] 행동: 적용한 전략·기술·협업 방식 등을 구체적으로 단계별로 보여줍니다.
+[R] 결과: 수치/퍼센트 기반의 개선 성과를 구조화하여 설명합니다.
+
+${text}
+`.trim();
+}
+
+// ----------------------------------------------------------
+// 기존 텍스트형 피드백 생성기
+// ----------------------------------------------------------
+function buildFeedbackText(ai) {
+  return [
+    `면접관 요약: ${ai.summary_interviewer}`,
+    "",
+    `코치 요약: ${ai.summary_coach}`,
+    "",
+    "■ Strengths",
+    ...(ai.strengths || []).map((s) => `• ${s}`),
+    "",
+    "■ Gaps",
+    ...(ai.gaps || []).map((s) => `• ${s}`),
+    "",
+    "■ Adds",
+    ...(ai.adds || []).map((s) => `• ${s}`),
+    "",
+    "■ Pitfalls",
+    ...(ai.pitfalls || []).map((p) => `• (레벨 ${p.level}) ${p.text}`),
+    "",
+    "■ Next Steps",
+    ...(ai.next || []).map((s) => `• ${s}`),
+    "",
+    "■ Polished",
+    ai.polished || "",
+  ].join("\n");
 }
 
 module.exports = { gradeAnswer };

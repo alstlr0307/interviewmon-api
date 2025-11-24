@@ -927,6 +927,7 @@ app.post('/api/sessions/:id/questions/:sqid/grade',
     if (!q)
       return res.status(404).json({ message: 'Question not found' });
 
+    // 🔥 V5 AI 엔진 호출
     const { data: aiRaw, feedbackText } = await gradeAnswer({
       company: sess.company,
       jobTitle: sess.jobTitle,
@@ -934,6 +935,7 @@ app.post('/api/sessions/:id/questions/:sqid/grade',
       answer
     });
 
+    // DB에 저장 — 지금 구조에 맞게 최소 정보만 저장
     await pool.execute(
       `UPDATE session_questions
           SET answer=?,
@@ -944,7 +946,7 @@ app.post('/api/sessions/:id/questions/:sqid/grade',
       [
         answer,
         aiRaw.score,
-        feedbackText,
+        feedbackText,                     // V5 전체 내용이 들어간 텍스트
         aiRaw.category || q.category || null,
         sqid,
         sessionId,
@@ -952,6 +954,7 @@ app.post('/api/sessions/:id/questions/:sqid/grade',
       ]
     );
 
+    // 프론트는 기존처럼 단순 구조로만 받음
     const tips =
       Array.isArray(aiRaw.gaps) || Array.isArray(aiRaw.adds)
         ? [...(aiRaw.gaps || []), ...(aiRaw.adds || [])]
@@ -962,12 +965,17 @@ app.post('/api/sessions/:id/questions/:sqid/grade',
       ai: {
         score: aiRaw.score,
         grade: aiRaw.grade,
-        summary: aiRaw.summary,
+
+        // 기존 프론트 대응을 위해 summary만 따라감
+        summary_interviewer: aiRaw.summary_interviewer,
+        summary_coach: aiRaw.summary_coach,
+
         strengths: aiRaw.strengths || null,
         gaps: aiRaw.gaps || null,
         adds: aiRaw.adds || null,
         pitfalls: aiRaw.pitfalls || null,
         next: aiRaw.next || null,
+
         tips,
         keywords: aiRaw.keywords ?? null,
         category: aiRaw.category ?? null,
