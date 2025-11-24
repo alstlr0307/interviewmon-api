@@ -113,6 +113,7 @@ app.use(cors({
   origin: (origin, cb) => {
     const whitelist = [
       "https://interviewmon-front.vercel.app",
+      "https://interviewmon-front-prok4hin3-minsiks-projects-b3256446.vercel.app",
       "http://localhost:3000"
     ];
 
