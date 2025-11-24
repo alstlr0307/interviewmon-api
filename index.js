@@ -669,7 +669,7 @@ app.patch('/api/sessions/:id', requireAuth, asyncH(async (req, res) => {
   args.push(id, req.user.sub);
 
   const [r] = await pool.execute(
-    `UPDATE session_questions SET ${sets.join(', ')} WHERE id=? AND user_id=?`,
+    `UPDATE mock_sessions SET ${sets.join(', ')} WHERE id=? AND user_id=?`,
     args
   );
 
