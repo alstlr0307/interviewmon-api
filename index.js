@@ -942,57 +942,51 @@ app.post('/api/sessions/:id/questions/:sqid/grade',
 
     // DB에 저장 — 지금 구조에 맞게 최소 정보만 저장
     await pool.execute(
-      `UPDATE session_questions
+        `UPDATE session_questions
           SET answer=?,
               score=?,
               feedback=?,
+
+              summary_interviewer=?,
+              summary_coach=?,
+              strengths=?,
+              gaps=?,
+              adds=?,
+              pitfalls=?,
+              next_steps=?,
+              polished=?,
+              keywords=?,
+              chart=?,
+              follow_up=?,
+
               category=COALESCE(category, ?)
         WHERE id=? AND session_id=? AND user_id=?`,
       [
         answer,
+    
         aiRaw.score,
-        feedbackText,                    
+        feedbackText,
+
+        aiRaw.summary_interviewer ?? null,
+        aiRaw.summary_coach ?? null,
+        aiRaw.strengths ? JSON.stringify(aiRaw.strengths) : null,
+        aiRaw.gaps ? JSON.stringify(aiRaw.gaps) : null,
+        aiRaw.adds ? JSON.stringify(aiRaw.adds) : null,
+        aiRaw.pitfalls ? JSON.stringify(aiRaw.pitfalls) : null,
+        aiRaw.next ? JSON.stringify(aiRaw.next) : null,
+        aiRaw.polished ?? null,
+        aiRaw.keywords ? JSON.stringify(aiRaw.keywords) : null,
+        aiRaw.chart ? JSON.stringify(aiRaw.chart) : null,
+        aiRaw.follow_up_questions ? JSON.stringify(aiRaw.follow_up_questions) : null,
+
         aiRaw.category || q.category || null,
         sqid,
         sessionId,
         req.user.sub
       ]
-    );
-
-    // 프론트는 기존처럼 단순 구조로만 받음
-    const tips =
-      Array.isArray(aiRaw.gaps) || Array.isArray(aiRaw.adds)
-        ? [...(aiRaw.gaps || []), ...(aiRaw.adds || [])]
-        : aiRaw.tips || null;
-
-    return res.json({
-      ok: true,
-      ai: {
-        score: aiRaw.score,
-        grade: aiRaw.grade,
-
-        // ⬅ summary는 반드시 "한 줄 요약"만 넣기
-        summary: aiRaw.summary_interviewer ?? aiRaw.summary_coach ?? "",
-
-        summary_interviewer: aiRaw.summary_interviewer,
-        summary_coach: aiRaw.summary_coach,
-
-        strengths: aiRaw.strengths || null,
-        gaps: aiRaw.gaps || null,
-        adds: aiRaw.adds || null,
-        pitfalls: aiRaw.pitfalls || null,
-        next: aiRaw.next || null,
-
-        tips,
-        keywords: aiRaw.keywords ?? null,
-        category: aiRaw.category ?? null,
-        polished: aiRaw.polished ?? null
-      }
-    });
-  })
-);
-
-
+    );  
+  }
+))
 // -----------------------------------------------------------------------------
 // 13) FINISH SESSION
 // -----------------------------------------------------------------------------
