@@ -936,6 +936,10 @@ app.post('/api/sessions/:id/questions/:sqid/grade',
       answer
     });
 
+    console.log("=== AI RESPONSE ===");
+    console.log(aiRaw);
+    console.log("Feedback:", feedbackText);
+
     // DB에 저장 — 지금 구조에 맞게 최소 정보만 저장
     await pool.execute(
       `UPDATE session_questions
