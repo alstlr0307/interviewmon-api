@@ -109,8 +109,22 @@ const corsOptions = {
 };
 
 // OPTIONS 프리플라이트 처리를 cors에서 수행
-app.use(cors(corsOptions));
-app.options(/.*/, cors(corsOptions));
+app.use(cors({
+  origin: (origin, cb) => {
+    const whitelist = [
+      "https://interviewmon-front.vercel.app",
+      "http://localhost:3000"
+    ];
+
+    // origin 없으면 허용 (서버-서버 요청)
+    if (!origin) return cb(null, true);
+
+    if (whitelist.includes(origin)) return cb(null, true);
+
+    return cb(new Error("CORS blocked: " + origin));
+  },
+  credentials: true,
+}));
 
 // /api 전역 캐시 금지
 app.use('/api', noCache);
