@@ -984,9 +984,13 @@ app.post('/api/sessions/:id/questions/:sqid/grade',
         sessionId,
         req.user.sub
       ]
-    );  
-  }
-))
+    ); 
+    return res.json({
+      ok: true,
+      ai: aiRaw,
+      feedback: feedbackText, 
+    })
+}))
 // -----------------------------------------------------------------------------
 // 13) FINISH SESSION
 // -----------------------------------------------------------------------------
