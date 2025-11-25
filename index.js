@@ -214,6 +214,17 @@ async function ensureOwnSession(sessionId, userId) {
   return rows.length ? rows[0] : null;
 }
 
+// 🔒 JSON 파싱 방탄용 헬퍼
+function safeJson(value, fallback) {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch (e) {
+    console.warn('[session_questions] JSON parse fail:', e.message, 'value=', value);
+    return fallback;
+  }
+}
+
 // -----------------------------------------------------------------------------
 // 7) Health
 // -----------------------------------------------------------------------------
