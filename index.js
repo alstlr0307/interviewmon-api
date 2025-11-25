@@ -964,7 +964,7 @@ app.post('/api/sessions/:id/questions/:sqid/grade',
       [
         answer,
     
-        aiRaw.score,
+        aiRaw.score_overall ?? null,
         feedbackText,
 
         aiRaw.summary_interviewer ?? null,
