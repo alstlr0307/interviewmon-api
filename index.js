@@ -1016,7 +1016,7 @@ app.post(
 );
 
 // -----------------------------------------------------------------------------
-// 12) AI GRADE (B 전략 + 안전 파싱용 ai.js 사용 전제)
+// 12) AI GRADE (improvements는 DB에 저장 안 함)
 // -----------------------------------------------------------------------------
 app.post(
   '/api/sessions/:id/questions/:sqid/grade',
@@ -1027,14 +1027,20 @@ app.post(
     const sqid = parseInt(req.params.sqid, 10);
 
     const answer = (req.body?.answer ?? '').toString().trim();
-    if (!answer) return res.status(400).json({ message: 'answer required' });
+    if (!answer) {
+      return res.status(400).json({ message: 'answer required' });
+    }
 
-    if (answer.length > 8000)
+    if (answer.length > 8000) {
       return res.status(413).json({ message: 'answer too long' });
+    }
 
-    if (!(await ensureOwnSession(sessionId, req.user.sub)))
+    // 세션 소유자 확인
+    if (!(await ensureOwnSession(sessionId, req.user.sub))) {
       return res.status(404).json({ message: 'Session not found' });
+    }
 
+    // 세션 정보
     const [[sess]] = await pool.query(
       `SELECT company, job_title AS jobTitle
          FROM mock_sessions
@@ -1042,9 +1048,11 @@ app.post(
         LIMIT 1`,
       [sessionId, req.user.sub]
     );
+    if (!sess) {
+      return res.status(404).json({ message: 'Session not found' });
+    }
 
-    if (!sess) return res.status(404).json({ message: 'Session not found' });
-
+    // 질문 정보
     const [[q]] = await pool.query(
       `SELECT text, category
          FROM session_questions
@@ -1052,21 +1060,23 @@ app.post(
         LIMIT 1`,
       [sqid, sessionId, req.user.sub]
     );
+    if (!q) {
+      return res.status(404).json({ message: 'Question not found' });
+    }
 
-    if (!q) return res.status(404).json({ message: 'Question not found' });
-
-    // 최신 AI 채점 엔진 호출 (ai.js 내부에서 JSON.parse 실패 시 안전 fallback 적용)
+    // 🔥 AI 채점 호출
     const { data: aiRaw, feedbackText } = await gradeAnswer({
       company: sess.company,
       jobTitle: sess.jobTitle,
       question: q.text,
-      answer
+      answer,
     });
 
     console.log('=== AI RESPONSE ===');
     console.log(aiRaw);
     console.log('Feedback:', feedbackText);
 
+    // 🔥 DB 저장 (improvements는 컬럼이 없으므로 저장 X)
     await pool.execute(
       `UPDATE session_questions
           SET answer=?,
@@ -1083,7 +1093,6 @@ app.post(
               keywords=?,
               chart=?,
               follow_up=?,
-              improvements=?,
               category=COALESCE(category, ?)
         WHERE id=? AND session_id=? AND user_id=?`,
       [
@@ -1105,19 +1114,19 @@ app.post(
         aiRaw.follow_up_questions
           ? JSON.stringify(aiRaw.follow_up_questions)
           : null,
-        aiRaw.improvements ? JSON.stringify(aiRaw.improvements) : null,
 
         aiRaw.category || q.category || null,
         sqid,
         sessionId,
-        req.user.sub
+        req.user.sub,
       ]
     );
 
+    // 클라이언트에는 improvements 포함해서 그대로 내려보내기
     return res.json({
       ok: true,
       ai: aiRaw,
-      feedback: feedbackText
+      feedback: feedbackText,
     });
   })
 );
