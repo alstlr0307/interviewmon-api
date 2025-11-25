@@ -1,8 +1,14 @@
-// ai.js (JSON 정규화 + Pitfalls/Polished 안전 처리 버전)
+// ai.js (gpt-4o-mini + JSON 정규화 + RateLimit 대응 + Fallback 안전버전)
 
 const OpenAI = require("openai");
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+/* =============================================================
+ *  카테고리 자동 분류
+ * ============================================================= */
 function pickCategory(question = "") {
   const q = question.toLowerCase();
   if (/(lead|mentor|conflict|communication)/.test(q)) return "behavior";
@@ -23,7 +29,9 @@ function gradeFromScore(score) {
   return "F";
 }
 
-/* ---------- 유틸: 배열/문자열 정규화 ---------- */
+/* =============================================================
+ *  JSON 유틸
+ * ============================================================= */
 function toArray(v) {
   if (v == null) return [];
   return Array.isArray(v) ? v : [v];
@@ -40,15 +48,13 @@ function toStringArray(v) {
 }
 
 function normalizePitfalls(v) {
-  // 언제 와도 { text, level? }[] 로 맞춘다
   return toArray(v)
     .map((p) => {
       if (!p) return null;
 
       if (typeof p === "string") {
         const t = p.trim();
-        if (!t) return null;
-        return { text: t, level: null };
+        return t ? { text: t, level: null } : null;
       }
 
       const text =
@@ -67,13 +73,46 @@ function normalizePitfalls(v) {
     .filter(Boolean);
 }
 
+function safeJSON(raw) {
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    console.error("❌ JSON 파싱 실패:", raw);
+    return null;
+  }
+}
+
+/* =============================================================
+ *  fallback 결과 (AI 오류 시 표시)
+ * ============================================================= */
+function fallbackResult(question) {
+  return {
+    score: 0,
+    grade: "F",
+    summary_interviewer: "",
+    summary_coach: "",
+    strengths: [],
+    gaps: [],
+    adds: [],
+    pitfalls: [],
+    next: [],
+    keywords: [],
+    category: pickCategory(question),
+    polished: "",
+  };
+}
+
+/* =============================================================
+ *  AI 채점 메인 함수
+ * ============================================================= */
 async function gradeAnswer({ company, jobTitle, question, answer }) {
   const model = process.env.AI_MODEL || "gpt-4o-mini";
 
   const systemPrompt = `
 당신은 실리콘밸리 기술면접관 + 시니어 코치입니다.
-반드시 JSON 한 개의 객체만 생성하십시오. 추가 설명/텍스트는 쓰지 마십시오.
-  `;
+반드시 JSON 객체 하나만 생성하십시오.
+추가 설명 금지.
+`;
 
   const userPrompt = `
 【질문】 ${question}
@@ -83,78 +122,72 @@ async function gradeAnswer({ company, jobTitle, question, answer }) {
 【답변】
 ${answer}
 
-다음 JSON 스키마를 정확히 따르십시오.
-
+정확히 아래 스키마로 JSON 생성:
 {
-  "score": 0,                            // 0~100 정수
-  "grade": "A",                          // "S","A","B","C","D","F" 중 하나
-  "summary_interviewer": "...",          // 면접관 요약 (2~3문장)
-  "summary_coach": "...",                // 코치 관점 요약 (2~3문장)
-  "strengths": ["..."],                  // 강점 리스트 (문장 단위)
-  "gaps": ["..."],                       // 부족한 점 리스트
-  "adds": ["..."],                       // 추가하면 좋은 내용
-  "pitfalls": ["..."],                   // 주의할 함정 (문장 리스트)
-  "next": ["..."],                       // 다음 도전/학습 방향
-  "keywords": ["..."],                   // 키워드 리스트
-  "category": "general",                 // behavior / tech / architecture / incident / data / general
-  "polished": "..."                      // 실제 면접에서 그대로 말해도 될 정제된 한 단락 (없으면 빈 문자열)
+  "score": 0,
+  "grade": "A",
+  "summary_interviewer": "...",
+  "summary_coach": "...",
+  "strengths": ["..."],
+  "gaps": ["..."],
+  "adds": ["..."],
+  "pitfalls": ["..."],
+  "next": ["..."],
+  "keywords": ["..."],
+  "category": "general",
+  "polished": "..."
 }
 `;
 
-  const response = await client.chat.completions.create({
-    model,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-  });
-
-  let raw = response.choices[0].message.content;
-  let parsed;
+  let raw;
 
   try {
-    parsed = JSON.parse(raw);
+    const resp = await client.chat.completions.create({
+      model,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+    });
+
+    raw = resp.choices[0].message.content;
   } catch (e) {
-    console.error("AI JSON parse error:", raw, e);
-    parsed = null;
-  }
+    // -------- Rate Limit 대응 --------
+    if (e.code === "rate_limit_exceeded") {
+      console.error("⚠️ RATE LIMIT 초과:", e.message);
 
-  if (!parsed || typeof parsed !== "object") {
-    // 완전 망한 경우 기본값 리턴
-    const fallback = {
-      score: 0,
-      grade: "F",
-      summary_interviewer: "",
-      summary_coach: "",
-      strengths: [],
-      gaps: [],
-      adds: [],
-      pitfalls: [],
-      next: [],
-      keywords: [],
-      category: pickCategory(question),
-      polished: "",
-    };
+      const fb = fallbackResult(question);
+      return {
+        data: fb,
+        feedbackText: "⚠️ 현재 AI 사용량이 초과되었습니다. 잠시 후 다시 시도해주세요.",
+      };
+    }
+
+    console.error("❌ AI 호출 오류:", e);
+
+    const fb = fallbackResult(question);
     return {
-      data: fallback,
-      feedbackText: buildFeedbackText(fallback),
+      data: fb,
+      feedbackText: "⚠️ AI 처리 오류가 발생했습니다.",
     };
   }
 
-  // 🔧 JSON 결과 정규화
+  const parsed = safeJSON(raw) || fallbackResult(question);
+
   const score = Number.isFinite(parsed.score) ? Math.round(parsed.score) : 0;
+
   let grade =
     typeof parsed.grade === "string" && parsed.grade.trim()
       ? parsed.grade.trim().toUpperCase()
-      : null;
+      : gradeFromScore(score);
+
   if (!["S", "A", "B", "C", "D", "F"].includes(grade)) {
     grade = gradeFromScore(score);
   }
 
   let polished =
     typeof parsed.polished === "string" ? parsed.polished.trim() : "";
-  // "yes" 같은 쓰레기 값은 버리기 (길이 너무 짧으면 폐기)
   if (polished.length < 10) polished = "";
 
   const data = {
@@ -181,84 +214,52 @@ ${answer}
     polished,
   };
 
-  const feedbackText = buildFeedbackText(data);
+  /* ------------ 피드백 텍스트 조립 ------------- */
+  const lines = [];
+
+  if (data.summary_interviewer)
+    lines.push(`면접관 요약: ${data.summary_interviewer}`);
+  if (data.summary_coach)
+    lines.push(`코치 요약: ${data.summary_coach}`);
+
+  lines.push("\n■ Strengths");
+  data.strengths.length
+    ? data.strengths.forEach((s) => lines.push("• " + s))
+    : lines.push("• (내용 없음)");
+
+  lines.push("\n■ Gaps");
+  data.gaps.length
+    ? data.gaps.forEach((s) => lines.push("• " + s))
+    : lines.push("• (내용 없음)");
+
+  lines.push("\n■ Adds");
+  data.adds.length
+    ? data.adds.forEach((s) => lines.push("• " + s))
+    : lines.push("• (내용 없음)");
+
+  lines.push("\n■ Pitfalls");
+  data.pitfalls.length
+    ? data.pitfalls.forEach((p) =>
+        lines.push(
+          p.level != null ? `• (레벨 ${p.level}) ${p.text}` : `• ${p.text}`
+        )
+      )
+    : lines.push("• (내용 없음)");
+
+  lines.push("\n■ Next");
+  data.next.length
+    ? data.next.forEach((s) => lines.push("• " + s))
+    : lines.push("• (내용 없음)");
+
+  if (data.polished) {
+    lines.push("\n■ Polished");
+    lines.push(data.polished);
+  }
 
   return {
     data,
-    feedbackText,
+    feedbackText: lines.join("\n"),
   };
-}
-
-function buildFeedbackText(ai) {
-  const lines = [];
-
-  if (ai.summary_interviewer) {
-    lines.push(`면접관 요약: ${ai.summary_interviewer}`);
-  }
-  if (ai.summary_coach) {
-    lines.push(`코치 요약: ${ai.summary_coach}`);
-  }
-
-  // Strengths
-  lines.push("");
-  lines.push("■ Strengths");
-  if (ai.strengths && ai.strengths.length) {
-    ai.strengths.forEach((s) => lines.push(`• ${s}`));
-  } else {
-    lines.push("• (내용 없음)");
-  }
-
-  // Gaps
-  lines.push("");
-  lines.push("■ Gaps");
-  if (ai.gaps && ai.gaps.length) {
-    ai.gaps.forEach((s) => lines.push(`• ${s}`));
-  } else {
-    lines.push("• (내용 없음)");
-  }
-
-  // Adds
-  lines.push("");
-  lines.push("■ Adds");
-  if (ai.adds && ai.adds.length) {
-    ai.adds.forEach((s) => lines.push(`• ${s}`));
-  } else {
-    lines.push("• (내용 없음)");
-  }
-
-  // Pitfalls
-  lines.push("");
-  lines.push("■ Pitfalls");
-  const pitfalls = normalizePitfalls(ai.pitfalls);
-  if (pitfalls.length) {
-    pitfalls.forEach((p) => {
-      if (p.level != null) {
-        lines.push(`• (레벨 ${p.level}) ${p.text}`);
-      } else {
-        lines.push(`• ${p.text}`);
-      }
-    });
-  } else {
-    lines.push("• (내용 없음)");
-  }
-
-  // Next steps
-  lines.push("");
-  lines.push("■ Next Steps");
-  if (ai.next && ai.next.length) {
-    ai.next.forEach((s) => lines.push(`• ${s}`));
-  } else {
-    lines.push("• (내용 없음)");
-  }
-
-  // Polished
-  if (ai.polished && ai.polished.trim().length > 0) {
-    lines.push("");
-    lines.push("■ Polished");
-    lines.push(ai.polished.trim());
-  }
-
-  return lines.join("\n");
 }
 
 module.exports = { gradeAnswer };
