@@ -193,36 +193,40 @@ const asyncH = (fn) => (req, res, next) =>
   Promise.resolve(fn(req, res, next)).catch(next);
 
 function requireAuth(req, res, next) {
-  const auth = req.headers.authorization || '';
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-
-  if (!token) return res.status(401).json({ message: 'Unauthorized' });
-
-  try {
-    req.user = verifyAccess(token);
-    next();
-  } catch {
-    return res.status(401).json({ message: 'Invalid token' });
-  }
+  if (req.user && req.user.sub) return next();
+  return res.status(401).json({ message: "Unauthorized" });
 }
 
+// 🔥 모든 세션 소유권 검사는 mock_sessions 기준으로 통일
 async function ensureOwnSession(sessionId, userId) {
   const [rows] = await pool.execute(
     'SELECT id FROM mock_sessions WHERE id=? AND user_id=? LIMIT 1',
     [sessionId, userId]
   );
-  return rows.length ? rows[0] : null;
+  return rows.length > 0;
 }
 
-// 🔒 JSON 파싱 방탄용 헬퍼
+// JSON 안전 파서
 function safeJson(value, fallback) {
-  if (!value) return fallback;
+  if (value == null) return fallback;
+  if (Array.isArray(value)) return value;
+  if (typeof value === "object") return value;
+  if (typeof value !== "string") return fallback;
   try {
     return JSON.parse(value);
-  } catch (e) {
-    console.warn('[session_questions] JSON parse fail:', e.message, 'value=', value);
+  } catch {
     return fallback;
   }
+}
+
+// 점수 → 등급
+function gradeFromScore(s) {
+  if (s >= 90) return "S";
+  if (s >= 80) return "A";
+  if (s >= 70) return "B";
+  if (s >= 60) return "C";
+  if (s >= 50) return "D";
+  return "F";
 }
 
 // -----------------------------------------------------------------------------
@@ -850,57 +854,57 @@ app.post(
 );
 
 // ---------------- LIST QUESTIONS ----------------
-app.get('/api/sessions/:id/questions', requireAuth, asyncH(async (req, res) => {
-  const sessionId = parseInt(req.params.id, 10);
+app.get(
+  "/api/sessions/:id/questions",
+  requireAuth,
+  asyncH(async (req, res) => {
+    const sessionId = parseInt(req.params.id, 10);
 
-  if (!await ensureOwnSession(sessionId, req.user.sub))
-    return res.status(404).json({ message: 'Session not found' });
+    if (!(await ensureOwnSession(sessionId, req.user.sub))) {
+      return res.status(404).json({ message: "Session not found" });
+    }
 
-  const [rows] = await pool.execute(
-    `SELECT *
-       FROM session_questions
-      WHERE session_id=? AND user_id=?
-      ORDER BY order_no ASC, id ASC`,
-    [sessionId, req.user.sub]
-  );
+    const [rows] = await pool.execute(
+      `SELECT *
+         FROM session_questions
+        WHERE session_id=? AND user_id=?
+        ORDER BY order_no ASC, id ASC`,
+      [sessionId, req.user.sub]
+    );
 
-  const items = rows.map((r) => ({
-    id: r.id,
-    questionId: r.question_id,
-    text: r.text,
-    category: r.category,
-    orderNo: r.order_no,
+    const items = rows.map((r) => ({
+      id: r.id,
+      questionId: r.question_id,
+      text: r.text,
+      category: r.category,
+      orderNo: r.order_no,
 
-    answer: r.answer,
-    score: r.score,
-    feedback: r.feedback,
+      answer: r.answer,
+      score: r.score,
+      feedback: r.feedback,
 
-    summary_interviewer: r.summary_interviewer,
-    summary_coach: r.summary_coach,
+      summary_interviewer: r.summary_interviewer,
+      summary_coach: r.summary_coach,
 
-    strengths: safeJson(r.strengths, []),
-    gaps:      safeJson(r.gaps, []),
-    adds:      safeJson(r.adds, []),
-    pitfalls:  safeJson(r.pitfalls, []),
+      strengths: safeJson(r.strengths, []),
+      gaps: safeJson(r.gaps, []),
+      adds: safeJson(r.adds, []),
+      pitfalls: safeJson(r.pitfalls, []),
 
-    // ⬇ 중요: DB(next_steps) → 프론트(next)
-    next: safeJson(r.next_steps, []),
+      next: safeJson(r.next_steps, []),
+      polished: r.polished,
 
-    polished: r.polished,
+      keywords: safeJson(r.keywords, []),
+      follow_up_questions: safeJson(r.follow_up, []),
+      chart: safeJson(r.chart, {}),
 
-    keywords: safeJson(r.keywords, []),
+      durationMs: r.duration_ms,
+      createdAt: r.created_at,
+    }));
 
-    // ⬇ 중요: DB(follow_up) → 프론트(follow_up_questions)
-    follow_up_questions: safeJson(r.follow_up, []),
-
-    chart: safeJson(r.chart, {}),
-
-    createdAt: r.created_at,
-    durationMs: r.duration_ms,
-  }));
-
-  return res.json({ items });
-}));
+    return res.json({ items });
+  })
+);
 
 // 질문 단건 업데이트
 app.patch(
@@ -1026,115 +1030,114 @@ app.post(
 // 12) AI GRADE (improvements는 DB에 저장 안 함)
 // -----------------------------------------------------------------------------
 app.post(
-  '/api/sessions/:id/questions/:sqid/grade',
-  gradeLimiter,
+  "/api/sessions/:id/questions/:sqid/grade",
   requireAuth,
   asyncH(async (req, res) => {
     const sessionId = parseInt(req.params.id, 10);
     const sqid = parseInt(req.params.sqid, 10);
+    const bodyAnswer = (req.body?.answer || "").toString();
 
-    const answer = (req.body?.answer ?? '').toString().trim();
-    if (!answer) {
-      return res.status(400).json({ message: 'answer required' });
-    }
-
-    if (answer.length > 8000) {
-      return res.status(413).json({ message: 'answer too long' });
-    }
-
-    // 세션 소유자 확인
     if (!(await ensureOwnSession(sessionId, req.user.sub))) {
-      return res.status(404).json({ message: 'Session not found' });
+      return res.status(404).json({ message: "Session not found" });
     }
 
-    // 세션 정보
-    const [[sess]] = await pool.query(
-      `SELECT company, job_title AS jobTitle
-         FROM mock_sessions
-        WHERE id=? AND user_id=?
-        LIMIT 1`,
-      [sessionId, req.user.sub]
-    );
-    if (!sess) {
-      return res.status(404).json({ message: 'Session not found' });
-    }
-
-    // 질문 정보
-    const [[q]] = await pool.query(
-      `SELECT text, category
-         FROM session_questions
-        WHERE id=? AND session_id=? AND user_id=?
-        LIMIT 1`,
+    // 질문 정보 + 회사/직무 정보 가져오기
+    const [rows] = await pool.execute(
+      `SELECT sq.*, s.company, s.job_title
+         FROM session_questions sq
+         JOIN sessions s ON s.id = sq.session_id
+        WHERE sq.id=? AND sq.session_id=? AND sq.user_id=?`,
       [sqid, sessionId, req.user.sub]
     );
-    if (!q) {
-      return res.status(404).json({ message: 'Question not found' });
+
+    const row = rows[0];
+    if (!row) {
+      return res.status(404).json({ message: "Question not found" });
     }
 
-    // 🔥 AI 채점 호출
-    const { data: aiRaw, feedbackText } = await gradeAnswer({
-      company: sess.company,
-      jobTitle: sess.jobTitle,
-      question: q.text,
+    const answer = bodyAnswer.trim() || row.answer || "";
+
+    // OpenAI 호출
+    const { data, feedbackText } = await gradeAnswer({
+      company: row.company,
+      jobTitle: row.job_title,
+      question: row.text,
       answer,
     });
 
-    console.log('=== AI RESPONSE ===');
-    console.log(aiRaw);
-    console.log('Feedback:', feedbackText);
+    const score = Number(data.score_overall || 0);
+    const grade = gradeFromScore(score);
+
+    const tips = Array.isArray(data.improvements)
+      ? data.improvements
+          .map((im) => (im && im.reason ? String(im.reason) : ""))
+          .filter(Boolean)
+      : [];
+
+    const aiPayload = {
+      score,
+      grade,
+      summary_interviewer: data.summary_interviewer || "",
+      summary_coach: data.summary_coach || "",
+      strengths: data.strengths || [],
+      gaps: data.gaps || [],
+      adds: data.adds || [],
+      pitfalls: data.pitfalls || [],
+      next: data.next || [],
+      tips,
+      keywords: data.keywords || [],
+      category: data.category || "general",
+      polished: data.polished || "",
+      chart: data.chart || null,
+      follow_up_questions: data.follow_up_questions || [],
+    };
 
     // 🔥 DB 저장 (improvements는 컬럼이 없으므로 저장 X)
     await pool.execute(
       `UPDATE session_questions
-          SET answer=?,
-              score=?,
-              feedback=?,
-              summary_interviewer=?,
-              summary_coach=?,
-              strengths=?,
-              gaps=?,
-              adds=?,
-              pitfalls=?,
-              next_steps=?,
-              polished=?,
-              keywords=?,
-              chart=?,
-              follow_up=?,
-              category=COALESCE(category, ?)
+          SET answer = ?,
+              score = ?,
+              feedback = ?,
+              chart = ?,
+              summary_interviewer = ?,
+              follow_up = ?,
+              summary_coach = ?,
+              category = COALESCE(?, category),
+              strengths = ?,
+              gaps = ?,
+              adds = ?,
+              pitfalls = ?,
+              next_steps = ?,
+              polished = ?,
+              keywords = ?
         WHERE id=? AND session_id=? AND user_id=?`,
       [
         answer,
-
-        aiRaw.score_overall ?? null,
+        score,
         feedbackText,
-
-        aiRaw.summary_interviewer ?? null,
-        aiRaw.summary_coach ?? null,
-        aiRaw.strengths ? JSON.stringify(aiRaw.strengths) : null,
-        aiRaw.gaps ? JSON.stringify(aiRaw.gaps) : null,
-        aiRaw.adds ? JSON.stringify(aiRaw.adds) : null,
-        aiRaw.pitfalls ? JSON.stringify(aiRaw.pitfalls) : null,
-        aiRaw.next ? JSON.stringify(aiRaw.next) : null,
-        aiRaw.polished ?? null,
-        aiRaw.keywords ? JSON.stringify(aiRaw.keywords) : null,
-        aiRaw.chart ? JSON.stringify(aiRaw.chart) : null,
-        aiRaw.follow_up_questions
-          ? JSON.stringify(aiRaw.follow_up_questions)
-          : null,
-
-        aiRaw.category || q.category || null,
+        JSON.stringify(data.chart || {}),
+        data.summary_interviewer || "",
+        JSON.stringify(aiPayload.follow_up_questions),
+        data.summary_coach || "",
+        aiPayload.category,
+        JSON.stringify(data.strengths || []),
+        JSON.stringify(data.gaps || []),
+        JSON.stringify(data.adds || []),
+        JSON.stringify(data.pitfalls || []),
+        JSON.stringify(data.next || []),
+        data.polished || "",
+        JSON.stringify(data.keywords || []),
         sqid,
         sessionId,
         req.user.sub,
       ]
     );
 
-    // 클라이언트에는 improvements 포함해서 그대로 내려보내기
-    return res.json({
-      ok: true,
-      ai: aiRaw,
-      feedback: feedbackText,
-    });
+    console.log("=== AI RESPONSE ===");
+    console.dir(data, { depth: null });
+    console.log("Feedback:", feedbackText);
+
+    return res.json({ ok: true, ai: aiPayload });
   })
 );
 
