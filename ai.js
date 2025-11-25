@@ -1,4 +1,5 @@
-// ai.js (gpt-4o-mini + JSON 정규화 + RateLimit 대응 + Fallback 안전버전)
+// ai.js — Interviewmon AI Engine v2.0
+// 완전 강화된 실전 공격형 피드백 + JSON 스키마 안정화 버전
 
 const OpenAI = require("openai");
 
@@ -19,8 +20,7 @@ function pickCategory(question = "") {
   return "general";
 }
 
-function gradeFromScore(score) {
-  const s = Number.isFinite(score) ? score : 0;
+function gradeFromScore(s) {
   if (s >= 90) return "S";
   if (s >= 80) return "A";
   if (s >= 70) return "B";
@@ -32,10 +32,7 @@ function gradeFromScore(score) {
 /* =============================================================
  *  JSON 유틸
  * ============================================================= */
-function toArray(v) {
-  if (v == null) return [];
-  return Array.isArray(v) ? v : [v];
-}
+const toArray = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
 
 function toStringArray(v) {
   return toArray(v)
@@ -44,99 +41,128 @@ function toStringArray(v) {
       if (x && typeof x.text === "string") return x.text.trim();
       return "";
     })
-    .filter((s) => s.length > 0);
+    .filter(Boolean);
 }
 
 function normalizePitfalls(v) {
   return toArray(v)
     .map((p) => {
       if (!p) return null;
+      if (typeof p === "string") return { text: p.trim(), level: null };
 
-      if (typeof p === "string") {
-        const t = p.trim();
-        return t ? { text: t, level: null } : null;
-      }
-
-      const text =
-        typeof p.text === "string" && p.text.trim().length > 0
-          ? p.text.trim()
-          : null;
-      if (!text) return null;
-
+      const text = typeof p.text === "string" ? p.text.trim() : null;
       const level =
         typeof p.level === "number" && Number.isFinite(p.level)
           ? p.level
           : null;
 
-      return { text, level };
+      return text ? { text, level } : null;
     })
     .filter(Boolean);
 }
 
-function safeJSON(raw) {
+const safeJSON = (raw) => {
   try {
     return JSON.parse(raw);
-  } catch (e) {
-    console.error("❌ JSON 파싱 실패:", raw);
+  } catch {
     return null;
   }
-}
+};
 
 /* =============================================================
- *  fallback 결과 (AI 오류 시 표시)
+ *  fallback
  * ============================================================= */
 function fallbackResult(question) {
   return {
-    score: 0,
-    grade: "F",
-    summary_interviewer: "",
-    summary_coach: "",
+    score_overall: 0,
+    scores: {
+      structure: 0,
+      specificity: 0,
+      logic: 0,
+      tech_depth: 0,
+      risk: 0,
+    },
     strengths: [],
     gaps: [],
-    adds: [],
-    pitfalls: [],
-    next: [],
+    logic_flaws: [],
+    missing_details: [],
+    risk_points: [],
+    follow_up_questions: [],
+    improvements: [],
+    polished_answers: { advanced: "" },
+    summary_interviewer: "",
+    summary_coach: "",
     keywords: [],
     category: pickCategory(question),
-    polished: "",
   };
 }
 
 /* =============================================================
- *  AI 채점 메인 함수
+ *  Main grading
  * ============================================================= */
 async function gradeAnswer({ company, jobTitle, question, answer }) {
   const model = process.env.AI_MODEL || "gpt-4o-mini";
 
   const systemPrompt = `
-당신은 실리콘밸리 기술면접관 + 시니어 코치입니다.
-반드시 JSON 객체 하나만 생성하십시오.
-추가 설명 금지.
+당신은 실리콘밸리 엘리트 면접관이다.
+당신은 매우 논리적이며, 공격적이고, 증거 기반 피드백을 제공한다.
+지원자의 답변에서 허점을 찾아내는 것이 최우선 목표다.
+
+규칙:
+1) 근거 없는 주장, 모호한 표현 → 즉시 지적
+2) 행동(Action)이 실제 실행인지 검증
+3) 성과(Result)에 수치·증거 없으면 날카롭게 비판
+4) 기술 깊이가 부족하면 어떤 부분이 얕은지 명확히 설명
+5) “했다”라고 말하는 부분 증거 요구
+6) 논리적 비약/과장 → 문장 단위로 콕 집어서 지적
+7) STAR 구조 부족 시 단계별 설명
+8) 실제 면접 꼬리질문 + 왜 물어보는지 이유 필수
+9) 공격적이지만 예의는 지킴
+JSON만 출력한다.
 `;
 
   const userPrompt = `
-【질문】 ${question}
-【직무】 ${jobTitle}
-【기업】 ${company}
+아래 JSON 스키마에 100% 맞춰 작성하십시오.
+필드 추가 금지. 누락 금지.
 
-【답변】
-${answer}
-
-정확히 아래 스키마로 JSON 생성:
 {
-  "score": 0,
-  "grade": "A",
-  "summary_interviewer": "...",
-  "summary_coach": "...",
-  "strengths": ["..."],
-  "gaps": ["..."],
-  "adds": ["..."],
-  "pitfalls": ["..."],
-  "next": ["..."],
-  "keywords": ["..."],
-  "category": "general",
-  "polished": "..."
+  "score_overall": 0,
+  "scores": {
+    "structure": 0,
+    "specificity": 0,
+    "logic": 0,
+    "tech_depth": 0,
+    "risk": 0
+  },
+  "strengths": [],
+  "gaps": [],
+  "logic_flaws": [
+    { "text": "", "why": "", "fix": "" }
+  ],
+  "missing_details": [
+    { "text": "", "why_needed": "" }
+  ],
+  "risk_points": [],
+  "follow_up_questions": [
+    { "question": "", "reason": "" }
+  ],
+  "improvements": [
+    { "before": "", "after": "", "reason": "" }
+  ],
+  "polished_answers": {
+    "advanced": ""
+  },
+  "summary_interviewer": "",
+  "summary_coach": "",
+  "keywords": []
 }
+
+질문: ${question}
+직무: ${jobTitle}
+기업: ${company}
+
+지원자 답변:
+${answer}
 `;
 
   let raw;
@@ -153,113 +179,42 @@ ${answer}
 
     raw = resp.choices[0].message.content;
   } catch (e) {
-    // -------- Rate Limit 대응 --------
-    if (e.code === "rate_limit_exceeded") {
-      console.error("⚠️ RATE LIMIT 초과:", e.message);
-
-      const fb = fallbackResult(question);
-      return {
-        data: fb,
-        feedbackText: "⚠️ 현재 AI 사용량이 초과되었습니다. 잠시 후 다시 시도해주세요.",
-      };
-    }
-
-    console.error("❌ AI 호출 오류:", e);
-
-    const fb = fallbackResult(question);
+    console.error("AI ERROR:", e);
     return {
-      data: fb,
-      feedbackText: "⚠️ AI 처리 오류가 발생했습니다.",
+      data: fallbackResult(question),
+      feedbackText: "⚠️ AI 사용량 초과 또는 내부 오류"
     };
   }
 
   const parsed = safeJSON(raw) || fallbackResult(question);
 
-  const score = Number.isFinite(parsed.score) ? Math.round(parsed.score) : 0;
-
-  let grade =
-    typeof parsed.grade === "string" && parsed.grade.trim()
-      ? parsed.grade.trim().toUpperCase()
-      : gradeFromScore(score);
-
-  if (!["S", "A", "B", "C", "D", "F"].includes(grade)) {
-    grade = gradeFromScore(score);
-  }
-
-  let polished =
-    typeof parsed.polished === "string" ? parsed.polished.trim() : "";
-  if (polished.length < 10) polished = "";
+  const score = Number(parsed.score_overall) || 0;
+  const grade = gradeFromScore(score);
 
   const data = {
     score,
     grade,
-    summary_interviewer:
-      typeof parsed.summary_interviewer === "string"
-        ? parsed.summary_interviewer.trim()
-        : "",
-    summary_coach:
-      typeof parsed.summary_coach === "string"
-        ? parsed.summary_coach.trim()
-        : "",
+    category: pickCategory(question),
+    summary_interviewer: parsed.summary_interviewer || "",
+    summary_coach: parsed.summary_coach || "",
     strengths: toStringArray(parsed.strengths),
     gaps: toStringArray(parsed.gaps),
-    adds: toStringArray(parsed.adds),
-    pitfalls: normalizePitfalls(parsed.pitfalls),
-    next: toStringArray(parsed.next),
+    adds: [], // 삭제됨
+    pitfalls: normalizePitfalls(parsed.risk_points),
+    next: [], // 필요 시 확장
     keywords: toStringArray(parsed.keywords),
-    category:
-      typeof parsed.category === "string" && parsed.category.trim()
-        ? parsed.category.trim()
-        : pickCategory(question),
-    polished,
+    polished: parsed.polished_answers?.advanced || "",
+    chart: parsed.scores || {},
+    follow_up_questions: parsed.follow_up_questions || [],
   };
 
-  /* ------------ 피드백 텍스트 조립 ------------- */
   const lines = [];
-
   if (data.summary_interviewer)
-    lines.push(`면접관 요약: ${data.summary_interviewer}`);
+    lines.push("면접관 요약: " + data.summary_interviewer);
   if (data.summary_coach)
-    lines.push(`코치 요약: ${data.summary_coach}`);
+    lines.push("코치 요약: " + data.summary_coach);
 
-  lines.push("\n■ Strengths");
-  data.strengths.length
-    ? data.strengths.forEach((s) => lines.push("• " + s))
-    : lines.push("• (내용 없음)");
-
-  lines.push("\n■ Gaps");
-  data.gaps.length
-    ? data.gaps.forEach((s) => lines.push("• " + s))
-    : lines.push("• (내용 없음)");
-
-  lines.push("\n■ Adds");
-  data.adds.length
-    ? data.adds.forEach((s) => lines.push("• " + s))
-    : lines.push("• (내용 없음)");
-
-  lines.push("\n■ Pitfalls");
-  data.pitfalls.length
-    ? data.pitfalls.forEach((p) =>
-        lines.push(
-          p.level != null ? `• (레벨 ${p.level}) ${p.text}` : `• ${p.text}`
-        )
-      )
-    : lines.push("• (내용 없음)");
-
-  lines.push("\n■ Next");
-  data.next.length
-    ? data.next.forEach((s) => lines.push("• " + s))
-    : lines.push("• (내용 없음)");
-
-  if (data.polished) {
-    lines.push("\n■ Polished");
-    lines.push(data.polished);
-  }
-
-  return {
-    data,
-    feedbackText: lines.join("\n"),
-  };
+  return { data, feedbackText: lines.join("\n") };
 }
 
 module.exports = { gradeAnswer };
