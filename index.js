@@ -849,62 +849,58 @@ app.post(
   })
 );
 
-// 질문 목록
-app.get(
-  '/api/sessions/:id/questions',
-  requireAuth,
-  asyncH(async (req, res) => {
-    const sessionId = parseInt(req.params.id, 10);
+// ---------------- LIST QUESTIONS ----------------
+app.get('/api/sessions/:id/questions', requireAuth, asyncH(async (req, res) => {
+  const sessionId = parseInt(req.params.id, 10);
 
-    if (!(await ensureOwnSession(sessionId, req.user.sub)))
-      return res.status(404).json({ message: 'Session not found' });
+  if (!await ensureOwnSession(sessionId, req.user.sub))
+    return res.status(404).json({ message: 'Session not found' });
 
-    const [rows] = await pool.execute(
-      `SELECT *
-         FROM session_questions
-        WHERE session_id=? AND user_id=?
-        ORDER BY order_no ASC, id ASC`,
-      [sessionId, req.user.sub]
-    );
+  const [rows] = await pool.execute(
+    `SELECT *
+       FROM session_questions
+      WHERE session_id=? AND user_id=?
+      ORDER BY order_no ASC, id ASC`,
+    [sessionId, req.user.sub]
+  );
 
-    const items = rows.map((r) => ({
-      id: r.id,
-      questionId: r.question_id,
-      text: r.text,
-      category: r.category,
-      orderNo: r.order_no,
+  const items = rows.map((r) => ({
+    id: r.id,
+    questionId: r.question_id,
+    text: r.text,
+    category: r.category,
+    orderNo: r.order_no,
 
-      answer: r.answer,
-      score: r.score,
-      feedback: r.feedback,
+    answer: r.answer,
+    score: r.score,
+    feedback: r.feedback,
 
-      summary_interviewer: r.summary_interviewer,
-      summary_coach: r.summary_coach,
+    summary_interviewer: r.summary_interviewer,
+    summary_coach: r.summary_coach,
 
-      strengths: r.strengths ? JSON.parse(r.strengths) : [],
-      gaps: r.gaps ? JSON.parse(r.gaps) : [],
-      adds: r.adds ? JSON.parse(r.adds) : [],
-      pitfalls: r.pitfalls ? JSON.parse(r.pitfalls) : [],
+    strengths: safeJson(r.strengths, []),
+    gaps:      safeJson(r.gaps, []),
+    adds:      safeJson(r.adds, []),
+    pitfalls:  safeJson(r.pitfalls, []),
 
-      // DB(next_steps) → 프론트(next)
-      next: r.next_steps ? JSON.parse(r.next_steps) : [],
+    // ⬇ 중요: DB(next_steps) → 프론트(next)
+    next: safeJson(r.next_steps, []),
 
-      polished: r.polished,
+    polished: r.polished,
 
-      keywords: r.keywords ? JSON.parse(r.keywords) : [],
+    keywords: safeJson(r.keywords, []),
 
-      // DB(follow_up) → 프론트(follow_up_questions)
-      follow_up_questions: r.follow_up ? JSON.parse(r.follow_up) : [],
+    // ⬇ 중요: DB(follow_up) → 프론트(follow_up_questions)
+    follow_up_questions: safeJson(r.follow_up, []),
 
-      chart: r.chart ? JSON.parse(r.chart) : {},
+    chart: safeJson(r.chart, {}),
 
-      createdAt: r.created_at,
-      durationMs: r.duration_ms
-    }));
+    createdAt: r.created_at,
+    durationMs: r.duration_ms,
+  }));
 
-    return res.json({ items });
-  })
-);
+  return res.json({ items });
+}));
 
 // 질문 단건 업데이트
 app.patch(
