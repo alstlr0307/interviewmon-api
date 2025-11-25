@@ -1029,6 +1029,9 @@ app.post(
 // -----------------------------------------------------------------------------
 // 12) AI GRADE (improvements는 DB에 저장 안 함)
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// 12) AI GRADE (improvements는 DB에 저장 안 함)
+// -----------------------------------------------------------------------------
 app.post(
   "/api/sessions/:id/questions/:sqid/grade",
   requireAuth,
@@ -1041,11 +1044,11 @@ app.post(
       return res.status(404).json({ message: "Session not found" });
     }
 
-    // 질문 정보 + 회사/직무 정보 가져오기
+    // 🔥 mock_sessions 기준으로 회사/직무 정보 가져오기
     const [rows] = await pool.execute(
       `SELECT sq.*, s.company, s.job_title
          FROM session_questions sq
-         JOIN sessions s ON s.id = sq.session_id
+         JOIN mock_sessions s ON s.id = sq.session_id
         WHERE sq.id=? AND sq.session_id=? AND sq.user_id=?`,
       [sqid, sessionId, req.user.sub]
     );
