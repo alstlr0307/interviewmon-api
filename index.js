@@ -31,7 +31,8 @@ const {
 const { gradeAnswer } = require('./ai');
 
 const app = express();
-const PORT = Number(process.env.PORT || 4000);
+const parsedPort = parseInt(process.env.PORT, 10);
+const PORT = Number.isFinite(parsedPort) ? parsedPort : 4000;
 const HOST = process.env.HOST || '0.0.0.0';
 
 // -----------------------------------------------------------------------------
@@ -769,15 +770,49 @@ app.get('/api/sessions/:id/questions', requireAuth, asyncH(async (req, res) => {
     return res.status(404).json({ message: 'Session not found' });
 
   const [rows] = await pool.execute(
-    `SELECT id, question_id AS questionId, text, category, order_no AS orderNo,
-            answer, score, feedback, duration_ms AS durationMs, created_at AS createdAt
+    `SELECT *
        FROM session_questions
       WHERE session_id=? AND user_id=?
       ORDER BY order_no ASC, id ASC`,
     [sessionId, req.user.sub]
   );
 
-  return res.json({ items: rows });
+  const items = rows.map(r => ({
+    id: r.id,
+    questionId: r.question_id,
+    text: r.text,
+    category: r.category,
+    orderNo: r.order_no,
+
+    answer: r.answer,
+    score: r.score,
+    feedback: r.feedback,
+
+    summary_interviewer: r.summary_interviewer,
+    summary_coach: r.summary_coach,
+
+    strengths: r.strengths ? JSON.parse(r.strengths) : [],
+    gaps: r.gaps ? JSON.parse(r.gaps) : [],
+    adds: r.adds ? JSON.parse(r.adds) : [],
+    pitfalls: r.pitfalls ? JSON.parse(r.pitfalls) : [],
+
+    // ⬇ 중요: DB(next_steps) → 프론트(next)
+    next: r.next_steps ? JSON.parse(r.next_steps) : [],
+
+    polished: r.polished,
+
+    keywords: r.keywords ? JSON.parse(r.keywords) : [],
+
+    // ⬇ 중요: DB(follow_up) → 프론트(follow_up_questions)
+    follow_up_questions: r.follow_up ? JSON.parse(r.follow_up) : [],
+
+    chart: r.chart ? JSON.parse(r.chart) : {},
+
+    createdAt: r.created_at,
+    durationMs: r.duration_ms
+  }));
+
+  return res.json({ items });
 }));
 
 
