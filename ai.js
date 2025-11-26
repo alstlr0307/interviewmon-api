@@ -3,7 +3,7 @@
 // Chat Completions 기반 AI 피드백 모듈 (JSON 전용 + 인터뷰 코치 스타일)
 //  - model: 환경변수 OPENAI_MODEL 없으면 gpt-4.1-mini 사용
 //  - 응답 형식: response_format: { type: "json_object" }  (Responses API 아님)
-//  - 점수: 세부 항목은 0~10점, 최종 총점은 0~100점으로 계산할 수 있게 설계
+//  - 세부 점수(0~10) → index.js에서 0~100으로 변환해서 사용 가능
 // -----------------------------------------------------------------------------
 
 const OpenAI = require("openai");
@@ -12,24 +12,21 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Chat Completions에서 쓸 모델
 const MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
-// 안전한 숫자 변환
+// ---------------- 공통 유틸 ----------------
 function toNumber(v, fallback = 0) {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
 
-// 0~10 범위로 클램프
 function clampScore10(v, fallback = 7) {
   const n = toNumber(v, fallback);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(0, Math.min(10, Math.round(n)));
 }
 
-// 문자열 배열로 정제
-function toStringArray(arr, limit = 10) {
+function toStringArray(arr, limit = 4) {
   if (!Array.isArray(arr)) return [];
   const res = [];
   for (const v of arr) {
@@ -42,8 +39,7 @@ function toStringArray(arr, limit = 10) {
   return res;
 }
 
-// 팔로업 질문 배열 정제 (객체 or 문자열 → 통일)
-function normalizeFollowUps(arr, limit = 5) {
+function normalizeFollowUps(arr, limit = 3) {
   if (!Array.isArray(arr)) return [];
   const out = [];
   for (const v of arr) {
@@ -62,32 +58,26 @@ function normalizeFollowUps(arr, limit = 5) {
   return out;
 }
 
-// 점수 요약 문장 텍스트 생성
 function buildFeedbackText(data, totalScore, scores) {
   const summaryInterviewer =
-    (data && data.summary_interviewer) ||
+    data.summary_interviewer ||
     "지원자는 전반적으로 강점과 개선 포인트를 균형 있게 보여주었습니다.";
   const summaryCoach =
-    (data && data.summary_coach) ||
+    data.summary_coach ||
     "세부 기술적 깊이와 구체적인 수치/사례를 보완하면 더 강력한 답변이 될 것입니다.";
 
+  const s = scores || {};
   const parts = [];
   parts.push(`총점은 ${totalScore}점(100점 만점)입니다.`);
-
-  if (scores) {
-    const s = scores;
-    parts.push(
-      `구조 ${s.structure}점, 구체성 ${s.specificity}점, 논리 ${s.logic}점, 기술 깊이 ${s.tech_depth}점, 리스크 관리 ${s.risk}점으로 평가되었습니다.`
-    );
-  }
-
+  parts.push(
+    `구조 ${s.structure}점, 구체성 ${s.specificity}점, 논리 ${s.logic}점, 기술 깊이 ${s.tech_depth}점, 리스크 관리 ${s.risk}점으로 평가되었습니다.`
+  );
   parts.push(summaryInterviewer);
   parts.push(summaryCoach);
-
   return parts.join("\n");
 }
 
-// 시스템 프롬프트
+// ---------------- 프롬프트 ----------------
 function buildSystemPrompt() {
   return `
 당신은 한국어로 답변하는 시니어 기술 인터뷰 코치입니다.
@@ -108,38 +98,39 @@ function buildSystemPrompt() {
 - 위 5개 세부 점수(0~10)의 평균을 기반으로 0~100점 스코어를 계산합니다.
 - 이 총점은 "score_overall" 필드에 0~100 범위로 넣어 주세요.
 
-JSON 필드 설명:
+JSON 필드:
 - score_overall: number (0~100) – 전체 종합 점수
-- scores: object
-  - structure, specificity, logic, tech_depth, risk: 각 0~10 정수
-- strengths: string[] – 면접관 입장에서 "이 지원자의 강점"이라 느껴지는 포인트들
-- gaps: string[] – 아쉽거나 부족한 부분 (기술/구조/스토리 등)
-- adds: string[] – 답변에 추가하면 좋을 내용 (예: 수치, 예시, 도구 선택 이유 등)
-- pitfalls: string[] – 면접에서 조심해야 할 위험 요소 (오해 소지, 과장, 모호함 등)
-- next: string[] – 다음 인터뷰까지 준비하면 좋은 실질적인 액션 아이템
-- logic_flaws: string[] – 논리적 비약, 앞뒤가 어색한 부분
-- missing_details: string[] – 반드시 있었으면 좋았을 구체적인 디테일
-- risk_points: string[] – 리스크 관리 측면에서 부족한 부분
-- improvements: { before: string; after: string; reason: string; }[]
-  - 실제 답변의 문장을 "이전(before) → 개선(after)" 형태로 1~3개 제시
-- polished: string
-  - 실제 면접에서 그대로 읽어도 되는 수준의 "다듬어진 모범 답변" (1~3단락 정도)
-- follow_up_questions: { question: string; reason: string; }[]
-  - 면접관이 실제로 던질 수 있는 추가 질문과, 그 질문을 던지는 이유
-- keywords: string[] – 이 답변을 요약하는 핵심 키워드 (회사/기술/행동 키워드 중심)
-- summary_interviewer: string – 면접관이 평가서에 적을 법한 한 단락 요약
-- summary_coach: string – 코치 입장에서 지원자에게 해주는 조언 한 단락
-- category: string – "culture", "collaboration", "ownership", "problem_solving", "tech_depth" 등 중 가장 어울리는 카테고리
-- chart: object – { structure, specificity, logic, tech_depth, risk } 점수(0~10) 그대로 넣기
+- scores: object { structure, specificity, logic, tech_depth, risk } (각 0~10 정수)
+- strengths: string[] – 최대 4개. 면접관 입장에서 "이 지원자의 강점".
+- gaps: string[] – 최대 4개. 아쉽거나 부족한 부분.
+- adds: string[] – 최대 4개. 답변에 추가하면 좋을 내용.
+- pitfalls: string[] – 최대 4개. 면접에서 조심해야 할 위험 요소.
+- next: string[] – 최대 4개. 다음 인터뷰까지 준비하면 좋은 액션 아이템.
+- logic_flaws: string[] – 최대 3개. 논리적 비약, 앞뒤 어색한 부분.
+- missing_details: string[] – 최대 3개. 꼭 있었으면 좋았을 디테일.
+- risk_points: string[] – 최대 3개. 리스크/안정성 측면에서 부족한 부분.
+- improvements: { before: string; after: string; reason: string; }[] – 최대 3개.
+- polished: string – 실제 면접에서 읽어도 되는 모범 답변.
+  * 한국어 기준 400자 이내, 2단락 이내로 제한.
+- follow_up_questions: { question: string; reason: string; }[] – 최대 3개.
+- keywords: string[] – 최대 6개. 회사/기술/행동 키워드 중심.
+- summary_interviewer: string – 면접관 평가서 한 단락 요약.
+- summary_coach: string – 코치 입장에서 지원자에게 해주는 한 단락 조언.
+- category: string – "culture", "collaboration", "ownership", "problem_solving", "tech_depth" 등 중 하나.
+- chart: object – { structure, specificity, logic, tech_depth, risk } 점수(0~10).
 
-반드시 지켜야 할 형식 규칙:
+길이 제약(매우 중요):
+- 전체 JSON은 되도록 5000자 이내, 절대 8000자를 넘지 마세요.
+- 각 배열 항목은 한 문장 정도로 짧게 작성합니다.
+- 불필요한 설명 문장은 쓰지 말고, 정보 밀도 위주로 간결하게 작성합니다.
+
+형식 규칙:
 - 최종 출력은 유효한 JSON 한 덩어리여야 합니다.
 - JSON 앞뒤에 설명 문장, 주석, 마크다운, \`\`\`json 코드블록 등은 절대 넣지 마세요.
 - 값이 비어도 필드는 모두 포함해 주세요(예: 빈 배열은 [] 로).
 `;
 }
 
-// 사용자 프롬프트
 function buildUserPrompt({ company, jobTitle, question, answer }) {
   const c = company || "알 수 없음";
   const j = jobTitle || "알 수 없음";
@@ -156,7 +147,7 @@ function buildUserPrompt({ company, jobTitle, question, answer }) {
     strengths: ["구체적인 수치와 사례 제시", "협업 과정에서의 역할이 명확함"],
     gaps: ["기술 선택 이유에 대한 설명 부족"],
     adds: ["성능 개선 폭을 숫자로 제시"],
-    pitfalls: ["용어를 너무 빠르게 설명 없이 사용하지 않기"],
+    pitfalls: ["용어를 설명 없이 남발하지 않기"],
     next: ["비슷한 사례를 1~2개 더 정리해두기"],
     logic_flaws: [],
     missing_details: ["도입 전/후 비교 수치"],
@@ -210,16 +201,16 @@ ${JSON.stringify(example, null, 2)}
 `;
 }
 
-// 실제로 호출되는 함수: index.js에서 사용하는 인터페이스 유지
+// ---------------- 메인 함수 ----------------
 async function gradeAnswer({ company, jobTitle, question, answer }) {
   const systemPrompt = buildSystemPrompt();
   const userPrompt = buildUserPrompt({ company, jobTitle, question, answer });
 
   const completion = await client.chat.completions.create({
     model: MODEL,
-    temperature: 0.35, // 살짝 창의적이지만 일관성 유지
-    max_tokens: 1200,  // 토큰 조금 넉넉하게
-    response_format: { type: "json_object" }, // ✅ Chat Completions용 JSON 강제
+    temperature: 0.35,
+    max_tokens: 2000, // 🔺 넉넉하게
+    response_format: { type: "json_object" },
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
@@ -234,11 +225,9 @@ async function gradeAnswer({ company, jobTitle, question, answer }) {
     raw = JSON.parse(content);
   } catch (e) {
     console.error("[gradeAnswer] JSON parse 실패, 원본 content =", content);
-    // 완전 깨지더라도 기본 구조는 채워서 리턴
-    raw = {};
+    raw = {}; // 완전 실패 시 기본값
   }
 
-  // 점수 정제
   const scoresRaw = raw.scores || {};
   const normScores = {
     structure: clampScore10(scoresRaw.structure, 7),
@@ -248,7 +237,6 @@ async function gradeAnswer({ company, jobTitle, question, answer }) {
     risk: clampScore10(scoresRaw.risk, 7),
   };
 
-  // 총점(0~100) 계산 – index.js에서 다시 계산하긴 하지만 여기서도 넣어둠
   const avg10 =
     (normScores.structure +
       normScores.specificity +
@@ -261,14 +249,14 @@ async function gradeAnswer({ company, jobTitle, question, answer }) {
   const data = {
     score_overall: toNumber(raw.score_overall, totalScore),
     scores: normScores,
-    strengths: toStringArray(raw.strengths, 10),
-    gaps: toStringArray(raw.gaps, 10),
-    adds: toStringArray(raw.adds, 10),
-    pitfalls: toStringArray(raw.pitfalls, 10),
-    next: toStringArray(raw.next, 10),
-    logic_flaws: toStringArray(raw.logic_flaws, 10),
-    missing_details: toStringArray(raw.missing_details, 10),
-    risk_points: toStringArray(raw.risk_points, 10),
+    strengths: toStringArray(raw.strengths, 4),
+    gaps: toStringArray(raw.gaps, 4),
+    adds: toStringArray(raw.adds, 4),
+    pitfalls: toStringArray(raw.pitfalls, 4),
+    next: toStringArray(raw.next, 4),
+    logic_flaws: toStringArray(raw.logic_flaws, 3),
+    missing_details: toStringArray(raw.missing_details, 3),
+    risk_points: toStringArray(raw.risk_points, 3),
     improvements: Array.isArray(raw.improvements)
       ? raw.improvements
           .filter(
@@ -278,11 +266,11 @@ async function gradeAnswer({ company, jobTitle, question, answer }) {
               typeof im.before === "string" &&
               typeof im.after === "string"
           )
-          .slice(0, 5)
+          .slice(0, 3)
       : [],
     polished: (raw.polished || "").toString(),
-    follow_up_questions: normalizeFollowUps(raw.follow_up_questions, 5),
-    keywords: toStringArray(raw.keywords, 10),
+    follow_up_questions: normalizeFollowUps(raw.follow_up_questions, 3),
+    keywords: toStringArray(raw.keywords, 6),
     summary_interviewer: (raw.summary_interviewer || "").toString(),
     summary_coach: (raw.summary_coach || "").toString(),
     category: (raw.category || "general").toString(),
