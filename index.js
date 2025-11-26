@@ -1105,7 +1105,7 @@ app.post(
     const answer = bodyAnswer.trim() || row.answer || "";
 
     // OpenAI 호출
-    const { data, feedbackText } = await gradeAnswer({
+    const { data, feedbackText: rawFeedback } = await gradeAnswer({
       company: row.company,
       jobTitle: row.job_title,
       question: row.text,
@@ -1158,6 +1158,54 @@ app.post(
       follow_up_questions: data.follow_up_questions || [],
     };
 
+    // -----------------------------
+    // 여기서 "맛있는" feedback 텍스트를 직접 조립
+    // -----------------------------
+    const lines = [];
+
+    // 1) 총점 / 등급
+    lines.push(`총점: ${score}점 (등급 ${grade})`);
+
+    // 2) 핵심 요약 (인터뷰어 요약 > 코치 요약 > rawFeedback 순으로 사용)
+    const coreSummary =
+      aiPayload.summary_interviewer ||
+      aiPayload.summary_coach ||
+      rawFeedback ||
+      "";
+    if (coreSummary) {
+      lines.push(`핵심 요약: ${coreSummary}`);
+    }
+
+    // 3) 핵심 키워드
+    if (aiPayload.keywords && aiPayload.keywords.length) {
+      lines.push(
+        `핵심 키워드: ${aiPayload.keywords.slice(0, 8).join(", ")}`
+      );
+    }
+
+    // 불릿 섹션 도우미
+    const makeBullet = (title, arr) => {
+      if (!arr || !arr.length) return null;
+      return `${title}\n- ${arr.join("\n- ")}`;
+    };
+
+    const bulletBlocks = [
+      makeBullet("강점", aiPayload.strengths),
+      makeBullet("개선 포인트", aiPayload.gaps),
+      makeBullet("위험 요소", aiPayload.pitfalls),
+      makeBullet("다음 단계", aiPayload.next),
+      makeBullet(
+        "예상 꼬리질문",
+        aiPayload.follow_up_questions.map((q) =>
+          typeof q === "string" ? q : q.question || ""
+        ).filter(Boolean)
+      ),
+    ].filter(Boolean);
+
+    lines.push(...bulletBlocks);
+
+    const feedbackText = lines.join("\n\n");
+
     // 🔥 DB 저장 (improvements는 저장 X)
     await pool.execute(
       `UPDATE session_questions
@@ -1180,28 +1228,28 @@ app.post(
       [
         answer,
         score,
-        feedbackText,
+        feedbackText, // ← 우리가 조립한 "맛있는" 텍스트를 저장
         JSON.stringify(chartNorm || {}),
-        data.summary_interviewer || "",
+        aiPayload.summary_interviewer,
         JSON.stringify(aiPayload.follow_up_questions || []),
-        data.summary_coach || "",
+        aiPayload.summary_coach,
         aiPayload.category,
-        JSON.stringify(data.strengths || []),
-        JSON.stringify(data.gaps || []),
-        JSON.stringify(data.adds || []),
-        JSON.stringify(data.pitfalls || []),
-        JSON.stringify(data.next || []),
-        data.polished || "",
-        JSON.stringify(data.keywords || []),
+        JSON.stringify(aiPayload.strengths || []),
+        JSON.stringify(aiPayload.gaps || []),
+        JSON.stringify(aiPayload.adds || []),
+        JSON.stringify(aiPayload.pitfalls || []),
+        JSON.stringify(aiPayload.next || []),
+        aiPayload.polished || "",
+        JSON.stringify(aiPayload.keywords || []),
         sqid,
         sessionId,
         req.user.sub,
       ]
     );
 
-    console.log("=== AI RESPONSE ===");
+    console.log("=== AI RESPONSE (raw) ===");
     console.dir(data, { depth: null });
-    console.log("Feedback:", feedbackText);
+    console.log("=== FEEDBACK TEXT (stored) ===\n" + feedbackText);
 
     return res.json({ ok: true, ai: aiPayload });
   })
