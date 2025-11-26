@@ -152,6 +152,26 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookies());
 
+// 🔑 AccessToken → req.user 세팅 미들웨어
+app.use((req, _res, next) => {
+  const header = req.headers["authorization"] || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : null;
+
+  if (token) {
+    try {
+      const payload = verifyAccess(token); // 위에서 import 한 함수
+      req.user = payload;                 // { sub, email, role, ... }
+    } catch (e) {
+      // 토큰이 깨졌거나 만료되면 그냥 익명 처리
+      req.user = null;
+    }
+  } else {
+    req.user = null;
+  }
+
+  next();
+});
+
 // Request ID
 app.use((req, res, next) => {
   req.id = req.headers['x-request-id'] || crypto.randomUUID();
@@ -197,21 +217,21 @@ function requireAuth(req, res, next) {
   return res.status(401).json({ message: "Unauthorized" });
 }
 
-// 🔥 모든 세션 소유권 검사는 mock_sessions 기준으로 통일
+// mock_sessions용으로 쓸 버전만 남기기
 async function ensureOwnSession(sessionId, userId) {
   const [rows] = await pool.execute(
-    'SELECT id FROM mock_sessions WHERE id=? AND user_id=? LIMIT 1',
+    "SELECT id FROM mock_sessions WHERE id=? AND user_id=? LIMIT 1",
     [sessionId, userId]
   );
-  return rows.length > 0;
+  return rows.length ? rows[0] : null;
 }
 
-// JSON 안전 파서
+// JSON 안전 파서 (로그 NO, 깨지면 fallback 리턴)
 function safeJson(value, fallback) {
-  if (value == null) return fallback;
-  if (Array.isArray(value)) return value;
-  if (typeof value === "object") return value;
+  if (value == null || value === "") return fallback;
+  if (Array.isArray(value) || typeof value === "object") return value;
   if (typeof value !== "string") return fallback;
+
   try {
     return JSON.parse(value);
   } catch {
@@ -219,7 +239,7 @@ function safeJson(value, fallback) {
   }
 }
 
-// 점수 → 등급
+// 점수 → 등급 (0~100 기준)
 function gradeFromScore(s) {
   if (s >= 90) return "S";
   if (s >= 80) return "A";
@@ -227,6 +247,27 @@ function gradeFromScore(s) {
   if (s >= 60) return "C";
   if (s >= 50) return "D";
   return "F";
+}
+
+// AI가 준 0~10 스코어를 조금 너그럽게 보정
+function soften10(v) {
+  const n = typeof v === "number" ? v : Number(v) || 0;
+  if (n <= 3) return n + 2; // 0~3점 → +2
+  if (n <= 5) return n + 1; // 4~5점 → +1
+  return n;                 // 나머지는 그대로
+}
+
+// chart/ scores 를 0~100 스케일로 정규화
+function normalizeChartFromAI(rawChart, rawScores) {
+  const src = rawChart && Object.keys(rawChart).length ? rawChart : rawScores || {};
+  const out = {};
+  for (const [k, v] of Object.entries(src)) {
+    const num = typeof v === "number" ? v : Number(v) || 0;
+    // 0~10이면 ×10, 이미 0~100처럼 크면 그대로 clamp
+    const base = num <= 10 ? num * 10 : num;
+    out[k] = Math.max(0, Math.min(100, Math.round(base)));
+  }
+  return out;
 }
 
 // -----------------------------------------------------------------------------
@@ -908,48 +949,55 @@ app.get(
 
 // 질문 단건 업데이트
 app.patch(
-  '/api/sessions/:id/questions/:sqid',
+  "/api/sessions/:id/questions/:sqid",
   requireAuth,
   asyncH(async (req, res) => {
     const sessionId = parseInt(req.params.id, 10);
     const sqid = parseInt(req.params.sqid, 10);
 
     if (!(await ensureOwnSession(sessionId, req.user.sub)))
-      return res.status(404).json({ message: 'Session not found' });
+      return res.status(404).json({ message: "Session not found" });
 
     const sets = [];
     const args = [];
 
-    if ('answer' in req.body) {
-      sets.push('answer=?');
+    if ("answer" in req.body) {
+      sets.push("answer=?");
       args.push(req.body.answer ?? null);
     }
-    if ('score' in req.body) {
-      sets.push('score=?');
-      args.push(req.body.score ?? null);
+
+    // 🔥 score는 숫자일 때만 반영
+    if (
+      Object.prototype.hasOwnProperty.call(req.body, "score") &&
+      typeof req.body.score === "number" &&
+      Number.isFinite(req.body.score)
+    ) {
+      sets.push("score=?");
+      args.push(req.body.score);
     }
-    if ('feedback' in req.body) {
-      sets.push('feedback=?');
+
+    if ("feedback" in req.body) {
+      sets.push("feedback=?");
       args.push(req.body.feedback ?? null);
     }
-    if ('durationMs' in req.body) {
-      sets.push('duration_ms=?');
+    if ("durationMs" in req.body) {
+      sets.push("duration_ms=?");
       args.push(req.body.durationMs ?? null);
     }
 
     if (!sets.length)
-      return res.status(400).json({ message: 'no fields' });
+      return res.status(400).json({ message: "no fields" });
 
     args.push(sessionId, req.user.sub, sqid);
 
     const [r] = await pool.execute(
-      `UPDATE session_questions SET ${sets.join(', ')}
+      `UPDATE session_questions SET ${sets.join(", ")}
         WHERE session_id=? AND user_id=? AND id=?`,
       args
     );
 
     if (r.affectedRows === 0)
-      return res.status(404).json({ message: 'Not found' });
+      return res.status(404).json({ message: "Not found" });
 
     return res.json({ ok: true });
   })
@@ -1025,10 +1073,6 @@ app.post(
     }
   })
 );
-
-// -----------------------------------------------------------------------------
-// 12) AI GRADE (improvements는 DB에 저장 안 함)
-// -----------------------------------------------------------------------------
 // -----------------------------------------------------------------------------
 // 12) AI GRADE (improvements는 DB에 저장 안 함)
 // -----------------------------------------------------------------------------
@@ -1044,7 +1088,7 @@ app.post(
       return res.status(404).json({ message: "Session not found" });
     }
 
-    // 🔥 mock_sessions 기준으로 회사/직무 정보 가져오기
+    // 질문 + 회사/직무 정보 가져오기 (mock_sessions 기준)
     const [rows] = await pool.execute(
       `SELECT sq.*, s.company, s.job_title
          FROM session_questions sq
@@ -1068,9 +1112,28 @@ app.post(
       answer,
     });
 
-    const score = Number(data.score_overall || 0);
+    // -----------------------------
+    // 점수 계산 (0~10 → soften → 0~100)
+    // -----------------------------
+    const scoresRaw = data.scores || {};
+    const parts10 = [
+      scoresRaw.structure,
+      scoresRaw.specificity,
+      scoresRaw.logic,
+      scoresRaw.tech_depth,
+      scoresRaw.risk,
+    ].map((v) => soften10(v));
+
+    const avg10 =
+      parts10.reduce((a, b) => a + b, 0) / Math.max(1, parts10.length);
+
+    const score = Math.max(0, Math.min(100, Math.round(avg10 * 10))); // 0~100
     const grade = gradeFromScore(score);
 
+    // chart 정규화 (0~100 스케일)
+    const chartNorm = normalizeChartFromAI(data.chart, scoresRaw);
+
+    // improvements → tips 로 추출
     const tips = Array.isArray(data.improvements)
       ? data.improvements
           .map((im) => (im && im.reason ? String(im.reason) : ""))
@@ -1091,11 +1154,11 @@ app.post(
       keywords: data.keywords || [],
       category: data.category || "general",
       polished: data.polished || "",
-      chart: data.chart || null,
+      chart: chartNorm,
       follow_up_questions: data.follow_up_questions || [],
     };
 
-    // 🔥 DB 저장 (improvements는 컬럼이 없으므로 저장 X)
+    // 🔥 DB 저장 (improvements는 저장 X)
     await pool.execute(
       `UPDATE session_questions
           SET answer = ?,
@@ -1118,9 +1181,9 @@ app.post(
         answer,
         score,
         feedbackText,
-        JSON.stringify(data.chart || {}),
+        JSON.stringify(chartNorm || {}),
         data.summary_interviewer || "",
-        JSON.stringify(aiPayload.follow_up_questions),
+        JSON.stringify(aiPayload.follow_up_questions || []),
         data.summary_coach || "",
         aiPayload.category,
         JSON.stringify(data.strengths || []),
